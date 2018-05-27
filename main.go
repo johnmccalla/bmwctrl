@@ -6,8 +6,10 @@ import (
 	"log"
 	"sync"
 
-	"bmwctrl/engines"
-	"bmwctrl/lingos"
+	"bmwctrl/device"
+	"bmwctrl/device/mock"
+	"bmwctrl/device/mpd"
+	"bmwctrl/device/spotify"
 	"os"
 
 	"github.com/urfave/cli"
@@ -45,9 +47,19 @@ func main() {
 	app.ErrWriter = os.Stdout
 	app.Flags = []cli.Flag{
 		cli.StringFlag{
-			Name:   "device, d",
-			Usage:  "Use `DEVICE` to connects to the bmw",
-			EnvVar: "BMWCTRL_DEVICE",
+			Name:   "transport, t",
+			Usage:  "Use `TRANSPORT` to connects to the bmw",
+			EnvVar: "BMWCTRL_TRANSPORT",
+		},
+		cli.StringFlag{
+			Name:   "transport-opts, o",
+			Usage:  "Set transport specific options.",
+			EnvVar: "BMWCTRL_TRANSPORT_OPTS",
+		},
+		cli.StringFlag{
+			Name:   "player, p",
+			Usage:  "Use 'PLAYER' to play music through the bmw.",
+			EnvVar: "BMWCTRL_PLAYER",
 		},
 		cli.StringFlag{
 			Name:   "logfile, l",
@@ -55,11 +67,11 @@ func main() {
 			EnvVar: "BMWCTRL_LOGFILE",
 		},
 		cli.BoolFlag{
-			Name:  "logframes, f",
+			Name:  "log-frames, f",
 			Usage: "Log all data frames to and from the bmw",
 		},
 		cli.BoolFlag{
-			Name:  "logcommands, c",
+			Name:  "log-commands, c",
 			Usage: "Log all commands to and from the bmw",
 		},
 	}
@@ -68,6 +80,7 @@ func main() {
 
 		// Setup the logger to output to a logfile instead of
 		// stderr, if requested.
+		log.SetFlags(log.Lmicroseconds)
 		logfile := c.String("logfile")
 		if logfile != "" {
 			f, err := os.Create(logfile)
@@ -80,31 +93,41 @@ func main() {
 
 		// Open the device that connects to the bmw.
 		log.Println("BMWCTRL startup")
-		device := c.String("device")
-		log.Printf("Opening '%s'", device)
-		options := serial.Options{
-			PortName: device,
-			BaudRate: 9600,
-			DataBits: 8,
-			StopBits: 1,
+		var transport ipod.FrameReadWriter
+		switch c.String("transport") {
+		case "serial":
+			transport = createSerialTransport(c)
+		default:
+			transport = createConsoleTransport(c)
 		}
-		if c.Bool("logframes") {
-			options.Tx = &txLogger{}
-			options.Rx = &rxLogger{}
+
+		// Create a command writer for sending responses and notifications
+		// back to the car.
+		logCmds := c.Bool("log-commands")
+		cmdWriter := &CommandFrameWriter{
+			frameWriter: transport,
+			logCmds:     logCmds,
+			mutex:       &sync.Mutex{},
 		}
-		frameTransport, err := serial.NewTransport(options)
-		if err != nil {
-			log.Fatalln("Error opening device:", err)
-			return err
+		notifications := device.NewPlayerNotifications(cmdWriter)
+
+		// Create a new player to handle the device behaviour.
+		var player device.Player
+		switch c.String("player") {
+		case "mpd":
+			player = mpd.NewPlayer(notifications)
+		case "spotify":
+			player = spotify.NewPlayer(notifications)
+		default:
+			player = mock.NewPlayer(notifications)
 		}
 
 		// Start off by requesting the bmw identify itself.
 		log.Printf("Connected, sending initial 'RequestIdentify'")
-		frameTransport.WriteFrame([]byte{0xff, 0x55, 0x02, 0x00, 0x00, 0xfe})
+		transport.WriteFrame([]byte{0xff, 0x55, 0x02, 0x00, 0x00, 0xfe})
 
 		// Go into frame processing loop.
-		logCmds := c.Bool("logcommands")
-		runFrameProcessingLoop(frameTransport, logCmds)
+		runFrameProcessingLoop(transport, cmdWriter, player, logCmds)
 		log.Println("BMWCTRL shutdown")
 		return nil
 	}
@@ -126,8 +149,8 @@ func (t *CommandFrameWriter) WriteCommand(cmd *ipod.Command) error {
 
 	// Prevent multiple goroutines from writing at the same time, thus
 	// mangling the packets.
-	defer e.mutex.Unlock()
-	e.mutex.Lock()
+	defer t.mutex.Unlock()
+	t.mutex.Lock()
 
 	packet, err := cmd.MarshalBinary()
 	if err != nil {
@@ -146,14 +169,7 @@ func (t *CommandFrameWriter) WriteCommand(cmd *ipod.Command) error {
 	return err
 }
 
-func runFrameProcessingLoop(frameTransport ipod.FrameReadWriter, logCmds bool) {
-	cmdWriter := &CommandFrameWriter{
-		frameWriter: frameTransport,
-		logCmds:     logCmds,
-		mutex:       &sync.Mutex{},
-	}
-	notifications := engines.NewNotificationEngine(cmdWriter)
-	engine := engines.NewTestEngine(notifications)
+func runFrameProcessingLoop(frameTransport ipod.FrameReadWriter, cmdWriter ipod.CommandWriter, player device.Player, logCmds bool) {
 	for {
 		frame, err := frameTransport.ReadFrame()
 		if err != nil {
@@ -180,9 +196,35 @@ func runFrameProcessingLoop(frameTransport ipod.FrameReadWriter, logCmds bool) {
 		// Handle the 2 different lingos that are in play with this controller.
 		switch cmd.ID.LingoID() {
 		case general.LingoGeneralID:
-			lingos.HandleGeneralLingo(&cmd, cmdWriter)
+			handleGeneralLingo(&cmd, cmdWriter)
 		case extremote.LingoExtRemotelID:
-			lingos.HandleExtendedLingo(&cmd, cmdWriter, engine)
+			handleExtendedLingo(&cmd, cmdWriter, player)
 		}
 	}
+}
+
+func createSerialTransport(c *cli.Context) ipod.FrameReadWriter {
+	device := c.String("transport-opts")
+	log.Println("Opening serial device:", device)
+	options := serial.Options{
+		PortName: device,
+		BaudRate: 9600,
+		DataBits: 8,
+		StopBits: 1,
+	}
+	if c.Bool("log-frames") {
+		options.Tx = &txLogger{}
+		options.Rx = &rxLogger{}
+		log.Println("Enabling frame logging")
+	}
+	transport, err := serial.NewTransport(options)
+	if err != nil {
+		log.Fatalln("Error opening serial device:", err)
+		return nil
+	}
+	return transport
+}
+
+func createConsoleTransport(c *cli.Context) ipod.FrameReadWriter {
+	return nil
 }

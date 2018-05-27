@@ -1,0 +1,13 @@
+; This script file simulates the BMW MOST interface.
+; The syntax of script files is <delay>:<b1> <b2> ... <bn>.
+
+; BMW identifies itself and asks for 'ipod' information.
+040 : 55 03 00 01 04 f8
+100 : 55 03 00 0f 04 ea
+100 : 55 02 00 0d f1
+100 : 55 02 00 09 f5
+100 : 55 02 00 0b f3
+
+; BMW get the counts of all of the main lists (cd changer buttons)
+100 : 55 03 04 00 16 e3
+100 : 55 04 04 00 18 05 db

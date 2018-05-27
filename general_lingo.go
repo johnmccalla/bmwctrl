@@ -1,4 +1,4 @@
-package lingos
+package main
 
 import (
 	"github.com/oandrew/ipod"
@@ -8,7 +8,7 @@ import (
 // Handles the general indentification messages.  None of these are of any actual interest,
 // but are necessary handshaking.  We pretend to be a 4G iPod.  The code is organized in the
 // order BMW sends the commands upon initial connection.
-func HandleGeneralLingo(cmd *ipod.Command, cmdWriter ipod.CommandWriter) {
+func handleGeneralLingo(cmd *ipod.Command, cmdWriter ipod.CommandWriter) {
 	switch msg := cmd.Payload.(type) {
 
 	// BMW is identifying itself.  Do nothing on this message.

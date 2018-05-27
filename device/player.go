@@ -1,11 +1,11 @@
-package engines
+package device
 
 import (
 	"github.com/oandrew/ipod"
 	"github.com/oandrew/ipod/lingo-extremote"
 )
 
-type PlayerEngine interface {
+type Player interface {
 	ResetDBSelection()
 	SelectDBRecord(categoryType extremote.DBCategoryType, recordIndex int)
 	GetNumberCategorizedDBRecords(categoryType extremote.DBCategoryType) int
@@ -17,7 +17,7 @@ type PlayerEngine interface {
 
 	SetPlayStatusChangeNotification(notifications extremote.Notifications)
 	PlayControl(cmd extremote.PlayControlCmd)
-	PlaySelection(index int)
+	PlayCurrentSelection(index int)
 	GetNumPlayingTracks() int
 	GetCurrentPlayingTrackIndex() int
 	GetIndexedPlayingTrackTitle(index int) string
@@ -26,40 +26,40 @@ type PlayerEngine interface {
 	SetCurrentPlayingTrack(index int)
 }
 
-type NotificationEngine struct {
+type PlayerNotifications struct {
 	cmdWriter ipod.CommandWriter
 }
 
-func NewNotificationsEngine(cmdWriter ipod.CommandWriter) *NotificationEngine {
-	return &NotificationEngine{cmdWriter}
+func NewPlayerNotifications(cmdWriter ipod.CommandWriter) *PlayerNotifications {
+	return &PlayerNotifications{cmdWriter}
 }
 
-func (n *NotificationEngine) PlaybackStopped() {
+func (n *PlayerNotifications) PlaybackStopped() {
 	ipod.Send(n.cmdWriter, &extremote.PlayStatusChangeNotification{
 		Status: 0x00,
 	})
 }
 
-func (n *NotificationEngine) TrackIndexChanged(index int) {
+func (n *PlayerNotifications) TrackIndexChanged(index int) {
 	ipod.Send(n.cmdWriter, &extremote.TrackIndexChangeNotification{
 		Status: 0x01,
 		Index:  uint32(index),
 	})
 }
 
-func (n *NotificationEngine) PlaybackFFWSeekStopped() {
+func (n *PlayerNotifications) PlaybackFFWSeekStopped() {
 	ipod.Send(n.cmdWriter, &extremote.PlayStatusChangeNotification{
 		Status: 0x02,
 	})
 }
 
-func (n *NotificationEngine) PlaybackREWSeekStopped() {
+func (n *PlayerNotifications) PlaybackREWSeekStopped() {
 	ipod.Send(n.cmdWriter, &extremote.PlayStatusChangeNotification{
 		Status: 0x03,
 	})
 }
 
-func (n *NotificationEngine) TrackTimeOffset(offset int) {
+func (n *PlayerNotifications) TrackTimeOffset(offset int) {
 	ipod.Send(n.cmdWriter, &extremote.TrackTimeOffsetChangeNotification{
 		Status: 0x04,
 		Offset: uint32(offset),

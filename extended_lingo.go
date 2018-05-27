@@ -1,7 +1,8 @@
-package lingos
+package main
 
 import (
-	"bmwctrl/engines"
+	"bmwctrl/device"
+	"log"
 
 	"github.com/oandrew/ipod"
 	extremote "github.com/oandrew/ipod/lingo-extremote"
@@ -10,7 +11,7 @@ import (
 var shuffleMode = extremote.ShuffleOff
 var repeatMode = extremote.RepeatOff
 
-func HandleExtendedLingo(cmd *ipod.Command, cmdWriter ipod.CommandWriter, db engines.DatabaseEngine, pbe engines.PlaybackEngine) {
+func handleExtendedLingo(cmd *ipod.Command, cmdWriter ipod.CommandWriter, player device.Player) {
 	switch msg := cmd.Payload.(type) {
 
 	// BMW wants to know the screen size (it draws a BMW logo on real iPods).
@@ -28,24 +29,24 @@ func HandleExtendedLingo(cmd *ipod.Command, cmdWriter ipod.CommandWriter, db eng
 	case *extremote.SetDisplayImage:
 		extremote.RespondSuccess(cmd, cmdWriter)
 
-	// Database engine support. This is delegated to database engine providers
+	// Database engine support. This is delegated to player engine providers
 	// to allow different services to be hooked up to the car.
 	case *extremote.ResetDBSelection:
-		db.ResetDBSelection()
+		player.ResetDBSelection()
 		extremote.RespondSuccess(cmd, cmdWriter)
 
 	case *extremote.SelectDBRecord:
-		db.SelectDBRecord(msg.CategoryType, int(msg.RecordIndex))
+		player.SelectDBRecord(msg.CategoryType, int(msg.RecordIndex))
 		extremote.RespondSuccess(cmd, cmdWriter)
 
 	case *extremote.GetNumberCategorizedDBRecords:
 		ipod.Respond(cmd, cmdWriter, &extremote.ReturnNumberCategorizedDBRecords{
-			RecordCount: int32(db.GetNumberCategorizedDBRecords(msg.CategoryType)),
+			RecordCount: int32(player.GetNumberCategorizedDBRecords(msg.CategoryType)),
 		})
 
 	case *extremote.RetrieveCategorizedDatabaseRecords:
 		offset := int(msg.Offset)
-		records := db.RetrieveCategorizedDatabaseRecords(msg.CategoryType, offset, int(msg.Count))
+		records := player.RetrieveCategorizedDatabaseRecords(msg.CategoryType, offset, int(msg.Count))
 		for index, record := range records {
 			ipod.Respond(cmd, cmdWriter, &extremote.ReturnCategorizedDatabaseRecord{
 				RecordCategoryIndex: uint32(index + offset),
@@ -53,8 +54,47 @@ func HandleExtendedLingo(cmd *ipod.Command, cmdWriter ipod.CommandWriter, db eng
 			})
 		}
 
-	// Playback engine support.  As with the database support, this is delated to playback
+	// Playback engine support.  As with the database support, this is delegated to player
 	// engine providers to allow different services to run on this interface.
+	case *extremote.GetPlayStatus:
+		length, offset, state := player.GetPlayStatus()
+		ipod.Respond(cmd, cmdWriter, &extremote.ReturnPlayStatus{
+			TrackLength:   uint32(length),
+			TrackPosition: uint32(offset),
+			State:         state,
+		})
+
+	case *extremote.GetCurrentPlayingTrackIndex:
+		ipod.Respond(cmd, cmdWriter, &extremote.ReturnCurrentPlayingTrackIndex{
+			TrackIndex: int32(player.GetCurrentPlayingTrackIndex()),
+		})
+
+	case *extremote.GetIndexedPlayingTrackTitle:
+		ipod.Respond(cmd, cmdWriter, &extremote.ReturnIndexedPlayingTrackTitle{
+			Title: player.GetIndexedPlayingTrackTitle(int(msg.TrackIndex)),
+		})
+
+	case *extremote.GetIndexedPlayingTrackArtistName:
+		ipod.Respond(cmd, cmdWriter, &extremote.ReturnIndexedPlayingTrackArtistName{
+			ArtistName: player.GetIndexedPlayingTrackArtistName(int(msg.TrackIndex)),
+		})
+
+	case *extremote.GetIndexedPlayingTrackAlbumName:
+		ipod.Respond(cmd, cmdWriter, &extremote.ReturnIndexedPlayingTrackAlbumName{
+			AlbumName: player.GetIndexedPlayingTrackAlbumName(int(msg.TrackIndex)),
+		})
+
+	case *extremote.SetPlayStatusChangeNotification:
+		player.SetPlayStatusChangeNotification(msg.Mask)
+		extremote.RespondSuccess(cmd, cmdWriter)
+
+	case *extremote.PlayCurrentSelection:
+		player.PlayCurrentSelection(int(msg.SelectedTrackIndex))
+		extremote.RespondSuccess(cmd, cmdWriter)
+
+	case *extremote.PlayControl:
+		player.PlayControl(msg.Cmd)
+		extremote.RespondSuccess(cmd, cmdWriter)
 
 	// The shuffle and repeat support is handled internal, and not delegated.  This insures
 	// that the iPod rules for these feature is respected, and removes redundant work from
@@ -78,6 +118,6 @@ func HandleExtendedLingo(cmd *ipod.Command, cmdWriter ipod.CommandWriter, db eng
 		extremote.RespondSuccess(cmd, cmdWriter)
 
 	default:
-		extremote.HandleExtRemote(cmd, cmdWriter, nil)
+		log.Printf("[WARN] Unhandled extended lingo command: %x", cmd.ID.CmdID())
 	}
 }
