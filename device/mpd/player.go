@@ -10,6 +10,12 @@ import (
 	"github.com/oandrew/ipod/lingo-extremote"
 )
 
+// TODOs
+// 1. Listen for playlist changes, and figure out how to handle these.
+// 2. Hook up the notification mask.
+// 3. Playlists aren't retrieved at the start.
+// 4. Podcasts are ignored.
+
 // mpdPlayer implements the device.Player interface to allow bmwctrl to use
 // a MPD (Music Player Daemon) as a player. Almost all state and data is
 // obtained from the MPD in realtime, with the exception of the "selected
@@ -18,19 +24,19 @@ import (
 // doesn't introduce any additional restrictions, as the BMW head unit does
 // not deal with these lists changing very well (i.e. at all.)
 type mpdPlayer struct {
-	mpc               *mpd.Client
-	selected          []mpd.Attrs
-	notificationsMask extremote.Notifications
-	artists           []string
-	albums            []string
-	genres            []string
-	tracks            []string
-	playlists         []string
+	mpc       *mpd.Client
+	selected  []mpd.Attrs
+	notifCh   chan extremote.Notifications
+	artists   []string
+	albums    []string
+	genres    []string
+	tracks    []string
+	playlists []string
 }
 
 // NewPlayer creates a new MPD device player.
 func NewPlayer(notifications *device.PlayerNotifications) device.Player {
-	mpc, err := mpd.Dial("tcp", "6600")
+	mpc, err := mpd.Dial("tcp", "127.0.0.1:6600")
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -40,6 +46,7 @@ func NewPlayer(notifications *device.PlayerNotifications) device.Player {
 	p.albums, _ = mpc.List("album")
 	p.genres, _ = mpc.List("genre")
 	p.tracks, _ = mpc.List("title")
+	p.notifCh = make(chan extremote.Notifications, 1)
 	go p.run(notifications)
 	return p
 }
@@ -54,7 +61,11 @@ func (p *mpdPlayer) SelectDBRecord(categoryType extremote.DBCategoryType, record
 	} else {
 		switch categoryType {
 		case extremote.DbCategoryPlaylist:
-			p.selected, _ = p.mpc.Find("playlist", p.playlists[recordIndex])
+			if recordIndex > 0 {
+				p.selected, _ = p.mpc.Find("playlist", p.playlists[recordIndex])
+			} else {
+				p.selected, _ = p.mpc.ListAllInfo("/")
+			}
 		case extremote.DbCategoryArtist:
 			p.selected, _ = p.mpc.Find("artist", p.artists[recordIndex])
 		case extremote.DbCategoryAlbum:
@@ -108,30 +119,38 @@ func (p *mpdPlayer) RetrieveCategorizedDatabaseRecords(categoryType extremote.DB
 		return names
 	}
 	switch categoryType {
-	// case extremote.DbCategoryPlaylist:
-	// 	return len(p.playlists) + 1
+	case extremote.DbCategoryPlaylist:
+		if count < 0 {
+			count = len(p.playlists) + 1
+		}
+		names := make([]string, count)
+		names[0] = "All Songs"
+		for i := 1; i < count; i++ {
+			names[i] = p.playlists[i+offset-1]
+		}
+		return names
 	case extremote.DbCategoryArtist:
 		if count < 0 {
 			count = len(p.artists)
 		}
-		return p.artists[offset:count]
+		return p.artists[offset : offset+count]
 	case extremote.DbCategoryAlbum:
 		if count < 0 {
 			count = len(p.albums)
 		}
-		return p.albums[offset:count]
+		return p.albums[offset : offset+count]
 	case extremote.DbCategoryGenre:
 		if count < 0 {
 			count = len(p.genres)
 		}
-		return p.genres[offset:count]
+		return p.genres[offset : offset+count]
 	case extremote.DbCategoryTrack:
 		if count < 0 {
 			count = len(p.tracks)
 		}
-		return p.tracks[offset:count]
+		return p.tracks[offset : offset+count]
 	default:
-		log.Printf("[WARN] MPD player does not support counting category: %d.", categoryType)
+		log.Printf("[WARN] MPD player does not support retrieving category: %d.", categoryType)
 		return []string{}
 	}
 }
@@ -142,10 +161,7 @@ func (p *mpdPlayer) GetPlayStatus() (length int, offset int, state extremote.Pla
 }
 
 func (p *mpdPlayer) SetPlayStatusChangeNotification(notificationMask extremote.Notifications) {
-	// TODO
-	// defer p.player.mutex.Unlock()
-	// p.player.mutex.Lock()
-	// p.player.notifications = notifications
+	p.notifCh <- notificationMask
 }
 
 func (p *mpdPlayer) PlayControl(cmd extremote.PlayControlCmd) {
@@ -189,9 +205,11 @@ func (p *mpdPlayer) PlayControl(cmd extremote.PlayControlCmd) {
 }
 
 func (p *mpdPlayer) PlayCurrentSelection(index int) {
-	p.mpc.Clear()
-	for _, track := range p.selected {
-		p.mpc.Add(track["File"])
+	if p.selected != nil {
+		p.mpc.Clear()
+		for _, track := range p.selected {
+			p.mpc.Add(track["file"])
+		}
 	}
 	p.mpc.Play(index)
 }
@@ -230,34 +248,38 @@ func (p *mpdPlayer) SetCurrentPlayingTrack(index int) {
 func (p *mpdPlayer) run(notifications *device.PlayerNotifications) {
 	const interval = 500
 	ticker := time.NewTicker(interval * time.Millisecond)
-	watcher, _ := mpd.NewWatcher("tpc", "6600", "", "player")
+	watcher, _ := mpd.NewWatcher("tcp", "127.0.0.1:6600", "", "player")
 	defer watcher.Close()
 
 	var song int
 	var offset int
 	var state extremote.PlayerState
+	var notif extremote.Notifications
 	update := func() {
 		newSong, _, newOffset, newState := p.getPlayStatus()
-		if newSong != song {
+		if notif.TrackIndex && newSong != song {
 			notifications.TrackIndexChanged(newSong)
 			song = newSong
 		}
-		if newOffset != offset {
+		if notif.TrackTimeOffset && newOffset != offset {
 			notifications.TrackTimeOffset(newOffset)
 			offset = newOffset
 		}
-		if newState != state {
+		if notif.PlaybackStopped && newState != state {
 			if newState != extremote.PlayerStatePlaying {
 				notifications.PlaybackStopped()
 			}
-			newState = state
+			state = newState
 		}
 	}
-	select {
-	case <-watcher.Event:
-		update()
-	case <-ticker.C:
-		update()
+	for {
+		select {
+		case notif = <-p.notifCh:
+		case <-watcher.Event:
+			update()
+		case <-ticker.C:
+			update()
+		}
 	}
 }
 
@@ -270,8 +292,8 @@ func (p *mpdPlayer) getPlayStatus() (track int, length int, offset int, state ex
 	mpdLength, _ := strconv.ParseUint(status["length"], 10, 8)
 	length = int(mpdLength) * 1000
 
-	mpdTime, _ := strconv.ParseUint(status["time"], 10, 8)
-	offset = int(mpdTime) * 1000
+	mpdElapsed, _ := strconv.ParseFloat(status["elapsed"], 8)
+	offset = int(mpdElapsed * 1000)
 
 	switch status["state"] {
 	case "play":

@@ -74,13 +74,24 @@ func main() {
 			Name:  "log-commands, c",
 			Usage: "Log all commands to and from the bmw",
 		},
+		cli.BoolFlag{
+			Name:  "log-timestamps, s",
+			Usage: "Prefix logs with a timestamp",
+		},
 	}
 
 	app.Action = func(c *cli.Context) error {
 
+		// Add timestamp prefixes if requested.  This could be useful during
+		// testing (i.e. when not running as a service.)
+		if c.Bool("log-timestamps") {
+			log.SetFlags(log.Lmicroseconds)
+		} else {
+			log.SetFlags(0)
+		}
+
 		// Setup the logger to output to a logfile instead of
-		// stderr, if requested.
-		log.SetFlags(log.Lmicroseconds)
+		// stdout, if requested.
 		logfile := c.String("logfile")
 		if logfile != "" {
 			f, err := os.Create(logfile)
@@ -164,7 +175,7 @@ func (t *CommandFrameWriter) WriteCommand(cmd *ipod.Command) error {
 	}
 	err = t.frameWriter.WriteFrame(buffer.Bytes())
 	if err == nil && t.logCmds {
-		log.Printf("< %d %T %+v", cmd.ID.CmdID(), cmd.Payload, cmd.Payload)
+		log.Printf("< %x %T %+v", cmd.ID.CmdID(), cmd.Payload, cmd.Payload)
 	}
 	return err
 }
@@ -190,7 +201,7 @@ func runFrameProcessingLoop(frameTransport ipod.FrameReadWriter, cmdWriter ipod.
 			continue
 		}
 		if logCmds {
-			log.Printf("> %d %T %+v", cmd.ID.CmdID(), cmd.Payload, cmd.Payload)
+			log.Printf("> %x %T %+v", cmd.ID.CmdID(), cmd.Payload, cmd.Payload)
 		}
 
 		// Handle the 2 different lingos that are in play with this controller.

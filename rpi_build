@@ -1,0 +1,7 @@
+#!/bin/sh
+echo "Building BMWCTRL for Linux ARM v6."
+if GOOS=linux GOARCH=arm GOARM=6 go build
+then
+    echo "Deploying to Raspberry Pi."
+    scp bmwctrl pi@192.168.1.121:/home/pi/bmwctrl
+fi

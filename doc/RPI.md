@@ -188,6 +188,24 @@ to not grow paranoid doing listening tests.
 
 ## MPD Setup
 
+MPD setup is straight forward, but I wanted to switch from socket activation
+to zeroconf.  To install MPD:
+
+    sudo apt install mpd
+
+To switch from socket activation to zeroconf, start by uncommenting the relevant
+lines in `/etc/mpd.conf`:
+
+    zeroconf_enabled                "yes"
+    zeroconf_name                   "BMW Audio System Player"
+
+Also, make sure `bind_to_address` is commented out (or set to the default `any`).
+
+TODO: use zeroconf
+
+    sudo systemctl disable mpd.socket
+
+
 ## Spotify Setup
 
 After much mulling over, I decided to use the `Raspotify` service, which leans 
@@ -212,10 +230,39 @@ Note that data usage is very, very, low when playing songs that have previously
 been played.  Songs are only downloaded once.  Also, the cache does not have
 an expiration policy, so it will eventually fill your sd card.
 
-Finally, change the name of the Spotify Connect device from the generic name to 
+We'll also change the name of the Spotify Connect device from the generic name to 
 something more appropriate:
 
     DEVICE_NAME="BMW Audio System"
+
+Finally, we don't want Raspotify up when there's no network connection, so we'll
+create a script that starts and stops Raspotify based on Spotify being reachable.
+This will work regardless of direct or tethered access.
+
+    ping apresolve.spotify.com
+
+
+
+sudo dbus-send --system --type=method_call --dest=org.bluez /org/bluez/hci0/dev_80_AD_16_04_D3_ED org.bluez.Network1.Connect string:'nap'
+
+interface wlan0;
+metric 100;
+
+interface bnep0
+metric 150;
+
+TBR >>>>>
+
+Finally, we don't want Raspotify up when there's no network connection, so we'll
+bind 'network-online' to Raspotify.  This will start and stop the service as we
+go in and out of wifi areas.
+
+    After=network-online.target
+    BindTo=network-online.target
+
+And of course make sure systemd-networkd-wait-online is actually enabled: 
+
+    sudo systemctl enable systemd-networkd-wait-online.service
 
 Another option would be to use the `librespot-golang` project 
 (https://github.com/librespot-org/librespot-golang.git) and have Spotify Connect
@@ -261,3 +308,57 @@ To build the client example (Spotify Connect)
     cd ~/go/src/librespot-golang/src/examples/micro-client
     go get ./...
     go build    
+
+## Installing BMWCTRL Service
+
+We configure `bmwctrl` to start and stop when the car is plugged into
+the Pi, which we detect by the presence of the USB serial dongle. First,
+copy the binary to `/usr/bin/bmwctrl`.
+
+We have an overidable configuration file in `/etc/default/bmwctrl`,
+which looks like this:
+
+    # /etc/default/bmwctrl -- Arguments/configuration for bmwctrl.
+
+    # Uncomment to log all frames received and sent over the serial
+    # device.
+    LOGFRAMES="--logframes"
+
+    # Uncomment to log all commands received and sent from/to the bmw.
+    LOGCOMMANDS="--logcommands"
+
+Note that the comm device is not an argument in the configuration file,
+as that will be setup with systemd to support hotplug (see below.)
+
+The service itself is defined in `/lib/systemd/system/bmmctrl@.service`.
+It is templated to the actual com device, so it should work with any
+device.
+
+    [Unit]
+    Description=BMW Controller
+    After=network.target
+    After=%i.device
+    BindTo=%i.device
+
+    [Service]
+    Restart=always
+    RestartSec=10
+    PermissionsStartOnly=true
+    Environment="DEVICE="
+    Environment="LOGFRAMES="
+    Environment="LOGCOMMANDS="
+    EnvironmentFile=-/etc/default/bmwctrl
+    ExecStart=/opt/bmwctrl --device ${DEVICE} ${LOGFRAMES} ${LOGCOMMANDS}
+
+    [Install]
+    WantedBy=multi-user.target dev-%i.device
+
+This says systemd should wait until both the network is up and the car is
+plugged in before starting.  It also binds the comm device to the service,
+which will cause systemd to stop `bwmctrl` when it is unplugged.  The install
+clause also tells systemd that the comm device itself wants bmwctrl, which
+causes our service to be restarted when the comm device is plugged in again.
+
+Finally, enable the service with:
+
+    sudo systemctl enable bmwctrl@ttyUSB0
