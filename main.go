@@ -181,6 +181,7 @@ func (t *CommandFrameWriter) WriteCommand(cmd *ipod.Command) error {
 }
 
 func runFrameProcessingLoop(frameTransport ipod.FrameReadWriter, cmdWriter ipod.CommandWriter, player device.Player, logCmds bool) {
+	identified := false
 	for {
 		frame, err := frameTransport.ReadFrame()
 		if err != nil {
@@ -204,8 +205,23 @@ func runFrameProcessingLoop(frameTransport ipod.FrameReadWriter, cmdWriter ipod.
 			log.Printf("> %x %T %+v", cmd.ID.CmdID(), cmd.Payload, cmd.Payload)
 		}
 
+		// Throw out any frames that occur before the initial identification
+		// has occured.  Not doing so caused bugs over the comm channel that
+		// we can't recover from (car aborts commands mid-frame, which is
+		// very difficult for us to detect.) Ignoring the commands eventually
+		// causes the car to go aback into an identify loop.
+		lingo := cmd.ID.LingoID()
+		if !identified {
+			if lingo == general.LingoGeneralID && cmd.ID.CmdID() == 0x01 {
+				identified = true
+			} else {
+				log.Println("[WARN] Not yet identified, ignoring command.")
+				continue
+			}
+		}
+
 		// Handle the 2 different lingos that are in play with this controller.
-		switch cmd.ID.LingoID() {
+		switch lingo {
 		case general.LingoGeneralID:
 			handleGeneralLingo(&cmd, cmdWriter)
 		case extremote.LingoExtRemotelID:
