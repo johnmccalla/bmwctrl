@@ -10,11 +10,10 @@ import (
 	"github.com/oandrew/ipod/lingo-extremote"
 )
 
-// TODOs
-// 1. Listen for playlist changes, and figure out how to handle these.
-// 2. Hook up the notification mask.
-// 3. Playlists aren't retrieved at the start.
-// 4. Podcasts are ignored.
+// Set the artist tag to the tag you wish to use for listing artists. Users
+// of Musicbrainz will probably want "AlbumArtist", while others will use the
+// default, if messy, "Artist".
+const artistTag = "AlbumArtist"
 
 // mpdPlayer implements the device.Player interface to allow bmwctrl to use
 // a MPD (Music Player Daemon) as a player. Almost all state and data is
@@ -22,11 +21,14 @@ import (
 // db records" (an iPod concept), and the list of playlists, artists, albums,
 // and genres.  The latter are obtained once from the MPD at startup.  This
 // doesn't introduce any additional restrictions, as the BMW head unit does
-// not deal with these lists changing very well (i.e. at all.)
+// not deal with these lists changing very well (i.e. at all.) Note that CD5
+// will always be nil because MPD doesn't have a concept of podcasts (although
+// a custom extension could be constructed using tags.)
 type mpdPlayer struct {
 	mpc       *mpd.Client
 	selected  []mpd.Attrs
 	notifCh   chan extremote.Notifications
+	notifMask extremote.Notifications
 	artists   []string
 	albums    []string
 	genres    []string
@@ -41,12 +43,18 @@ func NewPlayer(notifications *device.PlayerNotifications) device.Player {
 		log.Fatalln(err)
 	}
 	p := &mpdPlayer{mpc: mpc}
-	p.playlists = nil
-	p.artists, _ = mpc.List("artist")
+	playlists, _ := mpc.ListPlaylists()
+	p.playlists = make([]string, len(playlists))
+	for i, playlist := range playlists {
+		p.playlists[i] = playlist["playlist"]
+	}
+	p.artists, _ = mpc.List(artistTag)
 	p.albums, _ = mpc.List("album")
 	p.genres, _ = mpc.List("genre")
 	p.tracks, _ = mpc.List("title")
-	p.notifCh = make(chan extremote.Notifications, 1)
+	p.notifCh = make(chan extremote.Notifications)
+	log.Printf("[INFO] MPD Player has %d playlists, %d artists, %d albums, %d genres, and %d tracks.",
+		len(p.playlists), len(p.artists), len(p.albums), len(p.genres), len(p.tracks))
 	go p.run(notifications)
 	return p
 }
@@ -62,12 +70,12 @@ func (p *mpdPlayer) SelectDBRecord(categoryType extremote.DBCategoryType, record
 		switch categoryType {
 		case extremote.DbCategoryPlaylist:
 			if recordIndex > 0 {
-				p.selected, _ = p.mpc.Find("playlist", p.playlists[recordIndex])
+				p.selected, _ = p.mpc.PlaylistContents(p.playlists[recordIndex-1])
 			} else {
 				p.selected, _ = p.mpc.ListAllInfo("/")
 			}
 		case extremote.DbCategoryArtist:
-			p.selected, _ = p.mpc.Find("artist", p.artists[recordIndex])
+			p.selected, _ = p.mpc.Find(artistTag, p.artists[recordIndex])
 		case extremote.DbCategoryAlbum:
 			p.selected, _ = p.mpc.Find("album", p.albums[recordIndex])
 		case extremote.DbCategoryGenre:
@@ -124,8 +132,12 @@ func (p *mpdPlayer) RetrieveCategorizedDatabaseRecords(categoryType extremote.DB
 			count = len(p.playlists) + 1
 		}
 		names := make([]string, count)
-		names[0] = "All Songs"
-		for i := 1; i < count; i++ {
+		start := 0
+		if offset == 0 {
+			names[0] = "All Songs"
+			start++
+		}
+		for i := start; i < count; i++ {
 			names[i] = p.playlists[i+offset-1]
 		}
 		return names
@@ -161,10 +173,13 @@ func (p *mpdPlayer) GetPlayStatus() (length int, offset int, state extremote.Pla
 }
 
 func (p *mpdPlayer) SetPlayStatusChangeNotification(notificationMask extremote.Notifications) {
+	p.notifMask = notificationMask
 	p.notifCh <- notificationMask
 }
 
 func (p *mpdPlayer) PlayControl(cmd extremote.PlayControlCmd) {
+	var notifOff extremote.Notifications
+	p.notifCh <- notifOff
 	switch cmd {
 	case extremote.PlayControlToggle:
 		status, _ := p.mpc.Status()
@@ -202,9 +217,12 @@ func (p *mpdPlayer) PlayControl(cmd extremote.PlayControlCmd) {
 	case extremote.PlayControlPause:
 		p.mpc.Pause(true)
 	}
+	p.notifCh <- p.notifMask
 }
 
 func (p *mpdPlayer) PlayCurrentSelection(index int) {
+	var notifOff extremote.Notifications
+	p.notifCh <- notifOff
 	if p.selected != nil {
 		p.mpc.Clear()
 		for _, track := range p.selected {
@@ -212,6 +230,7 @@ func (p *mpdPlayer) PlayCurrentSelection(index int) {
 		}
 	}
 	p.mpc.Play(index)
+	p.notifCh <- p.notifMask
 }
 
 func (p *mpdPlayer) GetNumPlayingTracks() int {
@@ -233,7 +252,7 @@ func (p *mpdPlayer) GetIndexedPlayingTrackTitle(index int) string {
 
 func (p *mpdPlayer) GetIndexedPlayingTrackArtistName(index int) string {
 	info, _ := p.mpc.PlaylistInfo(index, -1)
-	return info[0]["Artist"]
+	return info[0][artistTag]
 }
 
 func (p *mpdPlayer) GetIndexedPlayingTrackAlbumName(index int) string {
